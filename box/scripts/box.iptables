@@ -317,6 +317,10 @@ log_capabilities() {
 }
 
 apply_capability_downgrades() {
+  if [ "${network_mode}" = "noproxy" ]; then
+    log Info "Noproxy 模式，跳过能力检测和降级。"
+    return 0
+  fi
   probe_capabilities
 
   local _old_mode="${network_mode}"
@@ -2095,6 +2099,10 @@ cleanup_iptables_family() {
   stop_tun_bypass
   forward -D
 
+  # 清理 noproxy 模式残留
+  del_jump_silent mangle OUTPUT BOX_NOPROXY_BYPASS
+  cleanup_chain_fast mangle BOX_NOPROXY_BYPASS
+
   if [ "${iptables}" = "$IP6V" ]; then
     del_rule_if_exists filter OUTPUT -p udp --destination-port 53 -j DROP
   fi
@@ -2193,6 +2201,68 @@ log_iptables_results() {
 
 if [ "$1" = "disable" ]; then
   runtime_load >/dev/null 2>&1 || true
+fi
+# noproxy 模式处理：不创建 iptables 转发规则，仅维护 CNIP ipset
+if [ "${network_mode}" = "noproxy" ]; then
+  case "$1" in
+    enable|renew)
+      log Info "Noproxy 模式：不创建 iptables 转发规则"
+      box_etc
+      setup_cn_ipset_if_needed
+
+      # 可选：CNIP 流量路由层旁路 VPN（bypass_cn_ip=true）
+      if [ "${bypass_cn_ip}" = "true" ] && command -v ipset >/dev/null 2>&1; then
+        # IPv4 CNIP bypass
+        iptables="$IPV"
+        ensure_chain mangle BOX_NOPROXY_BYPASS
+        ensure_rule_insert mangle OUTPUT -j BOX_NOPROXY_BYPASS
+        if [ "${bypass_cn_ip_v4}" = "true" ]; then
+          ensure_rule_append mangle BOX_NOPROXY_BYPASS \
+            -m set --match-set cnip dst -j MARK --set-xmark "${tun_bypass_mark}"
+        fi
+        ensure_ip_rule ip "${tun_bypass_mark}" "main" "${tun_bypass_pref}"
+
+        # IPv6 CNIP bypass（使用独立的 ip6tables 地址族）
+        if [ "${ipv6}" = "true" ]; then
+          iptables="$IP6V"
+          ensure_chain mangle BOX_NOPROXY_BYPASS
+          ensure_rule_insert mangle OUTPUT -j BOX_NOPROXY_BYPASS
+          if [ "${bypass_cn_ip_v6}" = "true" ]; then
+            ensure_rule_append mangle BOX_NOPROXY_BYPASS \
+              -m set --match-set cnip6 dst -j MARK --set-xmark "${tun_bypass_mark}"
+          fi
+          ensure_ip_rule "ip -6" "${tun_bypass_mark}" "main" "${tun_bypass_pref}"
+        fi
+        log Info "CNIP 路由旁路已启用"
+      fi
+
+      runtime_save
+      bin_alive && log Info "${bin_name} 已连接（Noproxy 模式）。"
+      ;;
+    disable)
+      log Info "Noproxy 模式：清理 CNIP 路由旁路"
+      # IPv4 cleanup（移除 OUTPUT 跳转后删除链）
+      iptables="$IPV"
+      del_jump_silent mangle OUTPUT BOX_NOPROXY_BYPASS
+      cleanup_chain_fast mangle BOX_NOPROXY_BYPASS
+      del_ip_rule_if_exists ip "${tun_bypass_mark}" "main" "${tun_bypass_pref}"
+      # IPv6 cleanup
+      if [ "${ipv6}" = "true" ]; then
+        iptables="$IP6V"
+        del_jump_silent mangle OUTPUT BOX_NOPROXY_BYPASS
+        cleanup_chain_fast mangle BOX_NOPROXY_BYPASS
+        del_ip_rule_if_exists "ip -6" "${tun_bypass_mark}" "main" "${tun_bypass_pref}"
+      fi
+      cleanup_cn_ipset_if_needed
+      runtime_clear
+      log Info "Noproxy 模式：清理完成。"
+      ;;
+    *)
+      echo "${red}$0: '$1' 未知命令${normal}"
+      echo "${yellow}用法:${normal} ${green}$0${normal} {${yellow}enable|disable|renew${normal}}"
+      ;;
+  esac
+  exit 0
 fi
 
 if [[ "${network_mode}" == @(redirect|mixed|tproxy|enhance) ]]; then

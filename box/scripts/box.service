@@ -842,6 +842,11 @@ prepare_mihomo() {
   else
     sed -i "/tun:/,/enable:/ { /enable: true/ s/enable: true/enable: false/ }" "${mihomo_config}"
   fi
+# noproxy 模式：主动关闭 TUN
+if [ "${network_mode}" = "noproxy" ]; then
+  sed -i "/tun:/,/^[^ ]/ { s/enable: true/enable: false/; }" "${mihomo_config}"
+  log Info "Noproxy 模式：已关闭 TUN"
+fi
 
   # 同步 tproxy/redir 端口
   sed -i -E "s/(tproxy-port: )[0-9]+/\1${tproxy_port}/" "${mihomo_config}"
