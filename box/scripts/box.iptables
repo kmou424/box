@@ -2236,6 +2236,25 @@ if [ "${network_mode}" = "noproxy" ]; then
         log Info "CNIP 路由旁路已启用"
       fi
 
+      # ${bin_name} 出站环路防护：cgroup + iptables 标记绕过 TUN
+      local PID
+      PID=$(busybox pidof ${bin_name} 2>/dev/null) || true
+      if [ -n "$PID" ]; then
+        mkdir -p "/sys/fs/cgroup/net/${bin_name}" 2>/dev/null || true
+        echo "$PID" > "/sys/fs/cgroup/net/${bin_name}/cgroup.procs" 2>/dev/null || true
+        # iptables mangle OUTPUT: 标记 ${bin_name} 所有出站连接绕过 TUN
+        ensure_rule_append mangle OUTPUT \
+          -m cgroup --path "/net/${bin_name}" \
+          -m conntrack --ctstate NEW \
+          -j CONNMARK --set-mark 0x01
+        ensure_rule_append mangle OUTPUT \
+          -m cgroup --path "/net/${bin_name}" \
+          -j CONNMARK --restore-mark
+        # 高优先级 ip rule：fwmark 0x01 → main 表
+        ensure_ip_rule ip "0x01" "main" "1"
+        log Info "${bin_name} 出站环路防护已启用"
+      fi
+
       runtime_save
       bin_alive && log Info "${bin_name} 已连接（Noproxy 模式）。"
       ;;
@@ -2254,6 +2273,17 @@ if [ "${network_mode}" = "noproxy" ]; then
         del_ip_rule_if_exists "ip -6" "${tun_bypass_mark}" "main" "${tun_bypass_pref}"
       fi
       cleanup_cn_ipset_if_needed
+
+      # 清理 ${bin_name} 出站环路防护规则
+      iptables -t mangle -D OUTPUT \
+        -m cgroup --path "/net/${bin_name}" \
+        -m conntrack --ctstate NEW \
+        -j CONNMARK --set-mark 0x01 2>/dev/null || true
+      iptables -t mangle -D OUTPUT \
+        -m cgroup --path "/net/${bin_name}" \
+        -j CONNMARK --restore-mark 2>/dev/null || true
+      del_ip_rule_if_exists ip "0x01" "main" "1"
+
       runtime_clear
       log Info "Noproxy 模式：清理完成。"
       ;;
